@@ -15,6 +15,7 @@ MIN_ROOM = 10
 ROOM_COLOR = "blue"
 JUNCTION_COLOR = "red"
 TUNNEL_COLOR = "k"
+TUNNEL_SENTINEL_VALUE = -1
 
 class State(Enum):
 	UNEXPLORED = 1
@@ -81,6 +82,7 @@ def partitionsToCategories(partitions, tiles):
 			assignTiles(part, tiles, State.TUNNEL)
 	return (rooms,junctions)
 
+# Gives upper X and Y bounds to scale matplotlib views correctly
 def getMaxDimensions(tiles):
 	maxX = 0
 	maxY = 0
@@ -126,6 +128,15 @@ def generateGraph(vertexClusters, tiles):
 		g.add_vertex(x=avgX, y=avgY, size=len(cluster), category=category, color=color)
 	return g
 
+def addPathsToGraph(g, paths):
+	edges = []
+	for vert in paths:
+		for dst in paths[vert]:
+			edges.append((vert,dst))
+	g.add_edges(edges)
+	g.simplify() # Removes duplicate (A-B, B-A) edges and self-loops
+	return g
+
 def plotGraph(g, tiles):
 	(maxX, maxY) = getMaxDimensions(tiles)
 	fig, ax = plt.subplots()
@@ -137,6 +148,70 @@ def plotGraph(g, tiles):
 	plt.savefig("graph.png", bbox_inches="tight", pad_inches=0)
 	plt.clf()
 
+def dumpMap(rooms, junctions, filename="floodfilled.csv"):
+	with open(filename, "w") as f:
+		i = 0
+		for room in rooms:
+			for (q,r,s) in room:
+				f.write("%d,%d,%d,%d,room\n" % (q,r,s,i))
+			i += 1
+		for junction in junctions:
+			for (q,r,s) in junction:
+				f.write("%d,%d,%d,%d,junction\n" % (q,r,s,i))
+			i += 1
+
+def labelTiles(rooms, junctions, tiles):
+	labels = dict()
+	i = 0
+	for room in rooms:
+		for tile in room:
+			labels[tile] = i
+		i += 1
+	for junction in junctions:
+		for tile in junction:
+			labels[tile] = i
+		i += 1
+	for tile in tiles:
+		if( not tile in labels ):
+			labels[tile] = TUNNEL_SENTINEL_VALUE
+	return labels
+
+# Given a single room or junction, learn what other rooms and
+# junctions are reachable from itself
+def discoverReachable(part, tiles):
+	reachable = set()
+	explored = set()
+	search = []
+	for tile in part:
+		neighbors = getNeighbors(*tile)
+		for n in neighbors:
+			if n in tiles and not n in explored:
+				search.append(n)
+				explored.add(n)
+	while( len(search) > 0 ):
+		tile = search.pop(0)
+		if tiles[tile] == TUNNEL_SENTINEL_VALUE:
+			neighbors = getNeighbors(*tile)
+			for n in neighbors:
+				if n in tiles and not n in explored:
+					search.append(n)
+					explored.add(n)
+		else:
+			# We've hit another room! Don't keep exploring, but *do* mark
+			# that we've reached this place
+			reachable.add(tiles[tile])
+	return reachable
+
+# For all partitions (rooms+tunnels) and a dict of labeled tiles,
+# return a dict of what vertices are reachable from what others
+def discoverTunnels(partitions, tiles):
+	tunnels = dict()
+	i = 0
+	for part in partitions:
+		tunnels[i] = discoverReachable(part, tiles)
+		i += 1
+	return tunnels
+
 if __name__ == "__main__":
 	df = pd.read_csv("mapped.csv", header=None, names=["q", "r", "s"])
 	tiles = dfToExploreDict(df)
@@ -144,4 +219,8 @@ if __name__ == "__main__":
 	(rooms,junctions) = partitionsToCategories(partitions, tiles)
 	plotLayout(tiles)
 	g = generateGraph(rooms+junctions, tiles)
+	dumpMap(rooms, junctions)
+	labeledTiles = labelTiles(rooms, junctions, tiles)
+	paths = discoverTunnels(rooms+junctions, labeledTiles)
+	addPathsToGraph(g, paths)
 	plotGraph(g,tiles)
